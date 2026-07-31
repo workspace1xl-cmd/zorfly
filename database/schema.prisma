@@ -4,7 +4,7 @@
 
 generator client {
   provider = "prisma-client"
-  output   = "../generated/prisma"
+  output   = "./generated/prisma"
 }
 
 datasource db {
@@ -38,6 +38,22 @@ enum MembershipStatus {
   TERMINATED
 
   @@schema("core")
+}
+
+enum IdentityProviderType {
+  LOCAL
+  OIDC
+  SAML
+
+  @@schema("platform")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DISABLED
+
+  @@schema("platform")
 }
 
 enum SupportAccessStatus {
@@ -506,6 +522,8 @@ model User {
   externalSubject        String?              @unique @db.VarChar(255)
   emailCanonical         String               @unique @db.VarChar(320)
   displayName            String?              @db.VarChar(200)
+  contactNumber          String?              @db.VarChar(32)
+  status                 UserStatus           @default(ACTIVE)
   locale                 String               @default("en") @db.VarChar(16)
   timeZone               String               @default("UTC") @db.VarChar(64)
   isPlatformOperator     Boolean              @default(false)
@@ -515,11 +533,89 @@ model User {
   deletedAt              DateTime?            @db.Timestamptz(6)
   rowVersion             Int                  @default(1)
   memberships            TenantMembership[]
+  credential             UserCredential?
+  identities             UserIdentity[]
+  sessions               UserSession[]
+  passwordResetTokens    PasswordResetToken[]
   supportAccessGrants    SupportAccessGrant[] @relation("SupportGrantee")
   supportAccessApprovals SupportAccessGrant[] @relation("SupportApprover")
   platformRoles          PlatformUserRole[]
 
   @@index([deletedAt])
+  @@index([status, deletedAt])
+  @@schema("platform")
+}
+
+model UserCredential {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId              String    @unique @db.Uuid
+  passwordHash        String    @db.VarChar(255)
+  passwordChangedAt   DateTime  @default(now()) @db.Timestamptz(6)
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime? @db.Timestamptz(6)
+  createdAt           DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt           DateTime? @db.Timestamptz(6)
+  rowVersion          Int       @default(1)
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([lockedUntil])
+  @@index([deletedAt])
+  @@schema("platform")
+}
+
+model UserIdentity {
+  id              String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String               @db.Uuid
+  providerType    IdentityProviderType
+  providerKey     String               @db.VarChar(120)
+  providerSubject String               @db.VarChar(255)
+  emailAtLink     String?              @db.VarChar(320)
+  metadata        Json?                @db.JsonB
+  lastUsedAt      DateTime?            @db.Timestamptz(6)
+  createdAt       DateTime             @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime             @updatedAt @db.Timestamptz(6)
+  deletedAt       DateTime?            @db.Timestamptz(6)
+  user            User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerKey, providerSubject])
+  @@index([userId, providerType, deletedAt])
+  @@schema("platform")
+}
+
+model UserSession {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId           String    @db.Uuid
+  activeTenantId   String?   @db.Uuid
+  refreshTokenHash String    @unique @db.Char(64)
+  expiresAt        DateTime  @db.Timestamptz(6)
+  lastUsedAt       DateTime  @default(now()) @db.Timestamptz(6)
+  revokedAt        DateTime? @db.Timestamptz(6)
+  revokeReason     String?   @db.VarChar(160)
+  sourceIpHash     String?   @db.Char(64)
+  userAgentHash    String?   @db.Char(64)
+  createdAt        DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @db.Timestamptz(6)
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activeTenant     Tenant?   @relation(fields: [activeTenantId], references: [id], onDelete: Restrict)
+
+  @@index([userId, revokedAt, expiresAt])
+  @@index([activeTenantId, expiresAt])
+  @@schema("platform")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique @db.Char(64)
+  expiresAt DateTime  @db.Timestamptz(6)
+  usedAt    DateTime? @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(6)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, usedAt, expiresAt])
+  @@index([expiresAt])
   @@schema("platform")
 }
 
@@ -662,6 +758,7 @@ model Tenant {
   departments             Department[]
   teams                   Team[]
   memberships             TenantMembership[]
+  sessions                UserSession[]
   roles                   TenantRole[]
   supportAccessGrants     SupportAccessGrant[]
   subscriptions           TenantSubscription[]
@@ -748,6 +845,7 @@ model Branch {
   rowVersion  Int                @default(1)
   tenant      Tenant             @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   departments Department[]
+  teams       Team[]
   memberships TenantMembership[]
 
   @@unique([tenantId, code])
@@ -787,6 +885,7 @@ model Team {
   id           String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId     String           @db.Uuid
   departmentId String?          @db.Uuid
+  branchId     String?          @db.Uuid
   code         String           @db.VarChar(40)
   name         String           @db.VarChar(160)
   status       RecordStatus     @default(ACTIVE)
@@ -799,10 +898,12 @@ model Team {
   rowVersion   Int              @default(1)
   tenant       Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   department   Department?      @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  branch       Branch?          @relation(fields: [branchId], references: [id], onDelete: Restrict)
   memberships  TeamMembership[]
 
   @@unique([tenantId, code])
   @@index([tenantId, departmentId, status, deletedAt])
+  @@index([tenantId, branchId, status, deletedAt])
   @@schema("core")
 }
 
@@ -874,23 +975,25 @@ model TeamMembership {
 }
 
 model TenantRole {
-  id          String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId    String                 @db.Uuid
-  key         String                 @db.VarChar(80)
-  name        String                 @db.VarChar(120)
-  description String?                @db.VarChar(500)
-  isSystem    Boolean                @default(false)
-  status      RecordStatus           @default(ACTIVE)
-  createdAt   DateTime               @default(now()) @db.Timestamptz(6)
-  updatedAt   DateTime               @updatedAt @db.Timestamptz(6)
-  createdById String?                @db.Uuid
-  updatedById String?                @db.Uuid
-  deletedAt   DateTime?              @db.Timestamptz(6)
-  deletedById String?                @db.Uuid
-  rowVersion  Int                    @default(1)
-  tenant      Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  permissions TenantRolePermission[]
-  memberships MembershipRole[]
+  id                    String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId              String                 @db.Uuid
+  key                   String                 @db.VarChar(80)
+  name                  String                 @db.VarChar(120)
+  description           String?                @db.VarChar(500)
+  rank                  Int                    @default(5) @db.SmallInt
+  isSystem              Boolean                @default(false)
+  permissionsCustomized Boolean                @default(false)
+  status                RecordStatus           @default(ACTIVE)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(6)
+  createdById           String?                @db.Uuid
+  updatedById           String?                @db.Uuid
+  deletedAt             DateTime?              @db.Timestamptz(6)
+  deletedById           String?                @db.Uuid
+  rowVersion            Int                    @default(1)
+  tenant                Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  permissions           TenantRolePermission[]
+  memberships           MembershipRole[]
 
   @@unique([tenantId, key])
   @@index([tenantId, status, deletedAt])
@@ -1208,7 +1311,7 @@ model Question {
   categoryId        String                      @db.Uuid
   difficultyLevelId String                      @db.Uuid
   code              String                      @db.VarChar(100)
-  title             String                      @db.VarChar(255)
+  title             String                      @db.VarChar(300)
   status            QuestionStatus              @default(DRAFT)
   currentVersionId  String?                     @unique @db.Uuid
   createdAt         DateTime                    @default(now()) @db.Timestamptz(6)
@@ -1648,7 +1751,7 @@ model AssignmentCampaign {
   source              AssignmentSource
   name                String                  @db.VarChar(200)
   opensAt             DateTime                @db.Timestamptz(6)
-  dueAt               DateTime                @db.Timestamptz(6)
+  dueAt               DateTime?               @db.Timestamptz(6)
   closesAt            DateTime?               @db.Timestamptz(6)
   maxAttempts         Int
   settings            Json?                   @db.JsonB
@@ -1691,7 +1794,7 @@ model AssessmentAssignment {
   source                 AssignmentSource
   status                 AssignmentStatus      @default(PENDING)
   availableAt            DateTime              @db.Timestamptz(6)
-  dueAt                  DateTime              @db.Timestamptz(6)
+  dueAt                  DateTime?             @db.Timestamptz(6)
   closesAt               DateTime?             @db.Timestamptz(6)
   maxAttempts            Int
   attemptCount           Int                   @default(0)

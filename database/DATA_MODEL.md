@@ -33,6 +33,7 @@ RLS is mandatory on every table with `tenantId`. Custom migration SQL adds
 tenant-consistent composite foreign keys, checks for polymorphic targets, and
 forced RLS. Platform-global exceptions are: `User`, `Permission`,
 `PlatformRole`, `PlatformRolePermission`, `PlatformUserRole`,
+`UserCredential`, `UserIdentity`, `UserSession`, `PasswordResetToken`,
 `SubscriptionPlan`, `PlanEntitlement`, `QuestionType`, `RewardType`,
 `AIProvider`, and `AIModel`.
 
@@ -40,7 +41,11 @@ forced RLS. Platform-global exceptions are: `User`, `Permission`,
 
 | Entity | Purpose | Fields | Relationships | Business rules |
 | --- | --- | --- | --- | --- |
-| `User` | Global human identity projection, independent of any tenant | external subject, canonical email, display/locale/time-zone data, operator flag, auth timestamp | Has tenant memberships, platform roles, support grants | Authentication data is external; deletion anonymizes identity while evidence retains actor UUID |
+| `User` | Global human identity, independent of any tenant | external subject, canonical email, display/contact/locale/time-zone data, status, operator flag, auth timestamp | Has credential, identities, sessions, reset tokens, tenant memberships, platform roles, support grants | Email is canonical and globally unique; suspension denies all new sessions; deletion anonymizes identity while evidence retains actor UUID |
+| `UserCredential` | Local password authentication secret and lock state | Argon2id hash, password-change time, failed-attempt count, lock expiry, row version | One-to-one with user | Hash only, never plaintext; password changes revoke active sessions; provider identities do not require a local credential |
+| `UserIdentity` | Link from a user to an external OIDC or SAML subject | provider type/key/subject, email-at-link, metadata, last-used time | Belongs to user | Provider key and subject globally unique; linking requires verified provider proof and account-takeover controls |
+| `UserSession` | Revocable browser/device refresh session | active tenant, HMAC refresh-token hash, expiry/use/revoke data, hashed IP/user agent | Belongs to user and optional active tenant | Raw refresh token exists only in an HTTP-only cookie; rotate on every refresh; membership and user status rechecked; password change/reset revokes all sessions |
+| `PasswordResetToken` | Single-use password-recovery proof | HMAC token hash, expiry and used time | Belongs to user | Raw token is sent only to the verified email; previous outstanding tokens invalidated; consumption and credential update are atomic |
 | `Permission` | Atomic authorization action catalogue | immutable key, description, risk level | Used by tenant and platform role-permission joins | Keys are global, stable, deny-by-default, and never wildcard grants |
 | `PlatformRole` | Platform operator responsibility | key, name, description | Has permissions and user assignments | Does not grant tenant-content access; support grant is separate |
 | `PlatformRolePermission` | Platform role-to-permission join | role ID, permission ID, timestamps | Belongs to role and permission | Composite unique primary key; changes audited |
@@ -62,10 +67,10 @@ forced RLS. Platform-global exceptions are: `User`, `Permission`,
 | `TenantBranding` | Tenant visual/email branding | logo version, colors, custom CSS, sender name | One per tenant; references media version | CSS/SVG processed by safety pipeline; logo reference must be same tenant |
 | `Branch` | Geographic/business organization unit | code, name, time zone, status | Tenant parent; has departments/members | Code unique in tenant; soft delete blocked while active dependants exist |
 | `Department` | Hierarchical functional unit | branch/parent IDs, code, name, status | Tenant/branch; self tree; teams/members | Code unique per tenant; no cycles; parent belongs to same tenant/branch policy |
-| `Team` | Work group | department ID, code, name, status | Tenant/department; team memberships | Code unique per tenant; department optional for flat organizations |
+| `Team` | Work group | department/branch IDs, code, name, status | Tenant/department/branch; team memberships | Code unique per tenant; department and branch are optional for flat organizations and must belong to the same tenant |
 | `TenantMembership` | User's employee membership in a company | user/org/manager IDs, employee number, title/level, status, employment dates | Tenant/user/org; roles, teams, assignments, results, learning/rewards | User unique per tenant; employee number tenant-unique; manager same tenant; status controls access |
 | `TeamMembership` | Time-bounded team participation | team/member IDs, lead flag, start/end | Joins team and membership | Team/member same tenant; one active row per pair; lead status auditable |
-| `TenantRole` | Tenant-owned RBAC role | key, name, description, system flag, status | Tenant; permissions and membership assignments | Key unique per tenant; system roles cannot be deleted, only superseded/deactivated |
+| `TenantRole` | Tenant-owned RBAC role | key, name, description, rank, system/customization flags, status | Tenant; permissions and membership assignments | Key unique per tenant; system roles cannot be deleted, only superseded/deactivated; customization flag distinguishes defaults from tenant overrides |
 | `TenantRolePermission` | Tenant role permission join | tenant, role, permission IDs | Role to global permission | Role tenant must match row tenant; composite uniqueness |
 | `MembershipRole` | Time-bounded role grant | tenant/member/role IDs, grant actor, expiry | Membership to tenant role | Member/role same tenant; expired grants ignored |
 | `SupportAccessGrant` | Explicit platform support access to a tenant | grantee/approver, reason, JSON scope, state, start/expiry/revoke | Tenant and two platform users | Approval, bounded scope, reason and expiry required; every use audited; self-approval prohibited |
